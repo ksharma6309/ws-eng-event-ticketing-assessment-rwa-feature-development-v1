@@ -8,6 +8,7 @@
     "dev:frontend": "cd frontend && npm run dev",
     "install:all": "npm install && cd backend && npm install && cd ../frontend && npm install",
     "build": "cd backend && npm run build && cd ../frontend && npm run build",
+    "test": "npm run check:types",
     "db:setup": "cd backend && npm run db:push && npm run db:seed",
     "db:reset": "cd backend && npm run db:reset",
     "submit": "tsx submit.ts",

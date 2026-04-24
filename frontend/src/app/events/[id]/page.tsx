@@ -2,9 +2,10 @@
 
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
+import Image from "next/image";
 import { Event, SeatTier } from "@/types";
 import { useAuth } from "@/contexts/AuthContext";
-import { eventsAPI, bookingsAPI, promoCodesAPI } from "@/lib/api";
+import { eventsAPI, bookingsAPI, promoCodesAPI, waitlistAPI } from "@/lib/api";
 import { formatDate, formatTime, formatCurrency } from "@/lib/utils";
 import { Card, CardContent } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
@@ -30,6 +31,13 @@ export default function EventPage() {
   const [promoDiscount, setPromoDiscount] = useState<{ type: string; value: number } | null>(null);
   const [promoError, setPromoError] = useState("");
   const [isValidatingPromo, setIsValidatingPromo] = useState(false);
+
+  // Waitlist state
+  const [isJoiningWaitlist, setIsJoiningWaitlist] = useState(false);
+  const [waitlistError, setWaitlistError] = useState("");
+  const [waitlistSuccess, setWaitlistSuccess] = useState("");
+  const [waitlistPosition, setWaitlistPosition] = useState<number | null>(null);
+  const [isOnWaitlist, setIsOnWaitlist] = useState(false);
 
   useEffect(() => {
     eventsAPI
@@ -86,8 +94,69 @@ export default function EventPage() {
     }
   };
 
+  const handleJoinWaitlist = async () => {
+    if (!token) {
+      router.push(`/login?callbackUrl=/events/${params.id}`);
+      return;
+    }
+    setIsJoiningWaitlist(true);
+    setWaitlistError("");
+    setWaitlistSuccess("");
+
+    try {
+      const res = await waitlistAPI.join(token, params.id as string);
+      setWaitlistSuccess(`You've been added to the waitlist! Your position: #${res.data.position}`);
+      setWaitlistPosition(res.data.position);
+      setIsOnWaitlist(true);
+    } catch (err) {
+      setWaitlistError(err instanceof Error ? err.message : "Failed to join waitlist");
+    } finally {
+      setIsJoiningWaitlist(false);
+    }
+  };
+
+  const handleLeaveWaitlist = async () => {
+    if (!token) return;
+    setIsJoiningWaitlist(true);
+    setWaitlistError("");
+    setWaitlistSuccess("");
+
+    try {
+      await waitlistAPI.leave(token, params.id as string);
+      setWaitlistSuccess("You've been removed from the waitlist.");
+      setWaitlistPosition(null);
+      setIsOnWaitlist(false);
+    } catch (err) {
+      setWaitlistError(err instanceof Error ? err.message : "Failed to leave waitlist");
+    } finally {
+      setIsJoiningWaitlist(false);
+    }
+  };
+
+  // Refresh waitlist position periodically when on waitlist
+  useEffect(() => {
+    if (!isOnWaitlist || !token || !params.id) return;
+
+    const refreshPosition = async () => {
+      try {
+        const res = await waitlistAPI.getPosition(token, params.id as string);
+        setWaitlistPosition(res.data.position);
+      } catch {
+        // Silently fail - position will be refreshed on next interval
+      }
+    };
+
+    // Refresh every 30 seconds
+    const interval = setInterval(refreshPosition, 30000);
+
+    // Also refresh immediately on mount
+    refreshPosition();
+
+    return () => clearInterval(interval);
+  }, [isOnWaitlist, token, params.id]);
+
   const getDisplayPrice = () => {
-    const basePrice = selectedTier ? selectedTier.price : (event?.price || 0);
+    const basePrice = selectedTier ? selectedTier.price : event?.price || 0;
     if (!promoDiscount) return basePrice;
     if (promoDiscount.type === "PERCENTAGE") {
       return basePrice * (1 - promoDiscount.value / 100);
@@ -96,7 +165,11 @@ export default function EventPage() {
   };
 
   if (isLoading) {
-    return <div className="flex items-center justify-center min-h-[50vh]"><Spinner size="lg" /></div>;
+    return (
+      <div className="flex items-center justify-center min-h-[50vh]">
+        <Spinner size="lg" />
+      </div>
+    );
   }
 
   if (error || !event) {
@@ -117,17 +190,24 @@ export default function EventPage() {
         <div className="lg:col-span-2 space-y-6">
           <div className="aspect-video bg-gray-200 rounded-lg overflow-hidden relative">
             {event.imageUrl ? (
-              <img src={event.imageUrl} alt={event.name} className="w-full h-full object-cover" />
+              <Image src={event.imageUrl} alt={event.name} fill className="object-cover" />
             ) : (
               <div className="w-full h-full flex items-center justify-center">
                 <svg className="h-20 w-20 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"
+                  />
                 </svg>
               </div>
             )}
             {isCancelled && (
               <div className="absolute inset-0 bg-black/60 flex items-center justify-center">
-                <Badge variant="danger" className="text-xl px-6 py-3">Event Cancelled</Badge>
+                <Badge variant="danger" className="text-xl px-6 py-3">
+                  Event Cancelled
+                </Badge>
               </div>
             )}
           </div>
@@ -162,8 +242,11 @@ export default function EventPage() {
                         key={tier.id}
                         onClick={() => !tierSoldOut && !isDisabled && setSelectedTier(tier)}
                         className={`border-2 rounded-lg p-4 cursor-pointer transition-all ${
-                          tierSoldOut ? "border-gray-200 bg-gray-50 opacity-60 cursor-not-allowed" :
-                          isSelected ? "border-sky-500 bg-sky-50" : "border-gray-200 hover:border-sky-300"
+                          tierSoldOut
+                            ? "border-gray-200 bg-gray-50 opacity-60 cursor-not-allowed"
+                            : isSelected
+                              ? "border-sky-500 bg-sky-50"
+                              : "border-gray-200 hover:border-sky-300"
                         }`}
                       >
                         <div className="flex justify-between items-center">
@@ -175,7 +258,11 @@ export default function EventPage() {
                           </div>
                           <div className="text-right">
                             <p className="text-xl font-bold text-sky-600">{formatCurrency(tier.price)}</p>
-                            {tierSoldOut && <Badge variant="danger" className="text-xs">Sold Out</Badge>}
+                            {tierSoldOut && (
+                              <Badge variant="danger" className="text-xs">
+                                Sold Out
+                              </Badge>
+                            )}
                           </div>
                         </div>
                       </div>
@@ -192,7 +279,12 @@ export default function EventPage() {
             <CardContent className="space-y-4">
               <div className="flex items-start space-x-3">
                 <svg className="h-6 w-6 text-sky-600 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"
+                  />
                 </svg>
                 <div>
                   <p className="font-medium text-gray-900">{formatDate(event.date)}</p>
@@ -202,8 +294,18 @@ export default function EventPage() {
 
               <div className="flex items-start space-x-3">
                 <svg className="h-6 w-6 text-sky-600 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"
+                  />
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"
+                  />
                 </svg>
                 <p className="font-medium text-gray-900">{event.venue}</p>
               </div>
@@ -220,7 +322,9 @@ export default function EventPage() {
                           <p className="text-lg text-gray-400 line-through">{formatCurrency(selectedTier.price)}</p>
                           <p className="text-3xl font-bold text-green-600">{formatCurrency(getDisplayPrice())}</p>
                           <p className="text-sm text-green-600">
-                            {promoDiscount.type === "PERCENTAGE" ? `${promoDiscount.value}% off` : `${formatCurrency(promoDiscount.value)} off`}
+                            {promoDiscount.type === "PERCENTAGE"
+                              ? `${promoDiscount.value}% off`
+                              : `${formatCurrency(promoDiscount.value)} off`}
                           </p>
                         </div>
                       ) : (
@@ -237,7 +341,9 @@ export default function EventPage() {
                         <p className="text-lg text-gray-400 line-through">{formatCurrency(event.price)}</p>
                         <p className="text-3xl font-bold text-green-600">{formatCurrency(getDisplayPrice())}</p>
                         <p className="text-sm text-green-600">
-                          {promoDiscount.type === "PERCENTAGE" ? `${promoDiscount.value}% off` : `${formatCurrency(promoDiscount.value)} off`}
+                          {promoDiscount.type === "PERCENTAGE"
+                            ? `${promoDiscount.value}% off`
+                            : `${formatCurrency(promoDiscount.value)} off`}
                         </p>
                       </div>
                     ) : (
@@ -256,10 +362,20 @@ export default function EventPage() {
                     <Input
                       placeholder="Promo code"
                       value={promoCode}
-                      onChange={(e) => { setPromoCode(e.target.value); setPromoError(""); setPromoDiscount(null); }}
+                      onChange={(e) => {
+                        setPromoCode(e.target.value);
+                        setPromoError("");
+                        setPromoDiscount(null);
+                      }}
                       className="flex-1"
                     />
-                    <Button size="sm" variant="secondary" onClick={handleApplyPromo} isLoading={isValidatingPromo} disabled={!promoCode.trim()}>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      onClick={handleApplyPromo}
+                      isLoading={isValidatingPromo}
+                      disabled={!promoCode.trim()}
+                    >
                       Apply
                     </Button>
                   </div>
@@ -270,9 +386,63 @@ export default function EventPage() {
 
               {purchaseError && <Alert variant="error">{purchaseError}</Alert>}
 
-              <Button className="w-full" size="lg" disabled={isDisabled} onClick={handlePurchase}>
-                {isCancelled ? "Event Cancelled" : isSoldOut ? "Sold Out" : isPastEvent ? "Event Ended" : "Buy Ticket"}
-              </Button>
+              {waitlistError && <Alert variant="error">{waitlistError}</Alert>}
+              {waitlistSuccess && <Alert variant="success">{waitlistSuccess}</Alert>}
+
+              {/* Show Buy Ticket button when available */}
+              {!isSoldOut && !isCancelled && !isPastEvent && (
+                <Button className="w-full" size="lg" onClick={handlePurchase}>
+                  Buy Ticket
+                </Button>
+              )}
+
+              {/* Show Sold Out badge when cancelled */}
+              {isCancelled && (
+                <Button className="w-full" size="lg" disabled>
+                  Event Cancelled
+                </Button>
+              )}
+
+              {/* Show Event Ended when past */}
+              {isPastEvent && !isCancelled && (
+                <Button className="w-full" size="lg" disabled>
+                  Event Ended
+                </Button>
+              )}
+
+              {/* Show Waitlist button when sold out */}
+              {isSoldOut && !isCancelled && !isPastEvent && (
+                <>
+                  {isOnWaitlist ? (
+                    <>
+                      {waitlistPosition && (
+                        <p className="text-sm text-center text-gray-600 mb-2">
+                          Your waitlist position: <strong>#{waitlistPosition}</strong>
+                        </p>
+                      )}
+                      <Button
+                        className="w-full"
+                        size="lg"
+                        variant="secondary"
+                        onClick={handleLeaveWaitlist}
+                        isLoading={isJoiningWaitlist}
+                      >
+                        Leave Waitlist
+                      </Button>
+                    </>
+                  ) : (
+                    <Button
+                      className="w-full"
+                      size="lg"
+                      variant="primary"
+                      onClick={handleJoinWaitlist}
+                      isLoading={isJoiningWaitlist}
+                    >
+                      Join Waitlist
+                    </Button>
+                  )}
+                </>
+              )}
 
               {isPastEvent && !isCancelled && <p className="text-center text-sm text-gray-500">This event has ended</p>}
             </CardContent>
@@ -298,7 +468,12 @@ export default function EventPage() {
               <>
                 <div className="flex justify-between text-green-600">
                   <span>Discount</span>
-                  <span>-{promoDiscount.type === "PERCENTAGE" ? `${promoDiscount.value}%` : formatCurrency(promoDiscount.value)}</span>
+                  <span>
+                    -
+                    {promoDiscount.type === "PERCENTAGE"
+                      ? `${promoDiscount.value}%`
+                      : formatCurrency(promoDiscount.value)}
+                  </span>
                 </div>
                 <hr />
                 <div className="flex justify-between font-bold text-lg">
@@ -310,8 +485,12 @@ export default function EventPage() {
           </div>
           <p className="text-gray-600 text-sm">This is a mock payment - no actual charge will be made.</p>
           <div className="flex space-x-3">
-            <Button variant="secondary" className="flex-1" onClick={() => setShowModal(false)} disabled={isPurchasing}>Cancel</Button>
-            <Button className="flex-1" onClick={confirmPurchase} isLoading={isPurchasing}>Confirm Purchase</Button>
+            <Button variant="secondary" className="flex-1" onClick={() => setShowModal(false)} disabled={isPurchasing}>
+              Cancel
+            </Button>
+            <Button className="flex-1" onClick={confirmPurchase} isLoading={isPurchasing}>
+              Confirm Purchase
+            </Button>
           </div>
         </div>
       </Modal>

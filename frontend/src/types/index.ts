@@ -79,6 +79,7 @@ export interface Booking {
   eventId: string;
   seatTierId: string | null;
   promoCodeId: string | null;
+  waitlistPosition?: number;
   event?: {
     id: string;
     name: string;

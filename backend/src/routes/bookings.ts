@@ -48,7 +48,24 @@ router.get("/", authenticate, async (req, res) => {
       },
     });
 
-    res.json({ success: true, data: bookings });
+    // Add waitlist position for WAITLISTED bookings
+    const bookingsWithPosition = await Promise.all(
+      bookings.map(async (booking) => {
+        if (booking.status === "WAITLISTED") {
+          const count = await prisma.booking.count({
+            where: {
+              eventId: booking.eventId,
+              status: "WAITLISTED",
+              createdAt: { lt: booking.createdAt },
+            },
+          });
+          return { ...booking, waitlistPosition: count + 1 };
+        }
+        return booking;
+      }),
+    );
+
+    res.json({ success: true, data: bookingsWithPosition });
   } catch (error) {
     console.error("Error fetching bookings:", error);
     res.status(500).json({
